@@ -2,13 +2,14 @@
 
 from flask import Flask, flash, g, jsonify, redirect, render_template, request, session, url_for
 import os
+from subprocess import call
 from roboclaw import Roboclaw
 from roboclaw_stub import Roboclaw_stub
 
 defaultAccelDecel = 2400
 defaultSpeed = 240
-errorPrefix = "ERROR: "
-successPrefix = "SUCCESS: "
+errorCategory = "error"
+successCategory = "success"
 
 app = Flask(__name__)
 
@@ -52,22 +53,22 @@ def checkRoboclawAddress():
 	global rc
 	# Do we have Roboclaw API object?
 	if rc is None:
-		msg = errorPrefix + "Roboclaw API not initialized"
-		flash(msg)
+		msg = "Roboclaw API not initialized"
+		flash(msg, errorCategory)
 		raise ValueError(msg)
 
 	# Do we have a Roboclaw address?
 	rcAddr = tryParseAddress(request.args.get('address'), default=None)
 	if rcAddr is None:
-		msg = errorPrefix + "Valid address parameter required"
-		flash(msg)
+		msg = "Valid address parameter required"
+		flash(msg, errorCategory)
 		raise ValueError(msg)
 
 	# Is there a Roboclaw at that address?
 	versionQuery = rc.ReadVersion(rcAddr)
 	if versionQuery[0] == 0:
-		msg = errorPrefix + "No Roboclaw response at {0} ({0:#x})".format(rcAddr)
-		flash(msg)
+		msg = "No Roboclaw response at {0} ({0:#x})".format(rcAddr)
+		flash(msg, errorCategory)
 		raise ValueError(msg)
 
 	return (rc, rcAddr)
@@ -83,8 +84,8 @@ def readResult(resultTuple, flashMessage=None):
 	if resultTuple[0] == 0:
 		msg = str(resultTuple)
 		if flashMessage is not None:
-			msg = errorPrefix + "{} {}".format(flashMessage, str(resultTuple))
-			flash(msg)
+			msg = "{} {}".format(flashMessage, str(resultTuple))
+			flash(msg, errorCategory)
 		raise ValueError(msg)
 
 	if len(resultTuple) == 2:
@@ -94,47 +95,59 @@ def readResult(resultTuple, flashMessage=None):
 
 # Every write operation returns True if successful. This helper looks for a
 # False and raises an exception when it happens. Optional flash message is 
-# placed in flash prepended with ERROR or SUCCESS depending on condition.
+# placed in flash with error or success category as appropriate.
 def writeResult(result, flashMessage=None):
 	if not result:
 		if flashMessage is not None:
-			flash(errorPrefix + flashMessage)
+			flash(flashMessage, errorCategory)
 		raise ValueError(flashMessage)
 	elif flashMessage is not None:
-		flash(successPrefix + flashMessage)
+		flash(flashMessage, successCategory)
+
+# Roboclaw directly connected on USB usually show up as /dev/ttyACM0
+# and sometimes /dev/ttyACM1 on Raspberry Pi & PC. On MacOS it has
+# shown up as /dev/ttyusbmodem. In both cases USB serial bridges
+# announce themselves as ttyUSB. Put all the possibilities in a list
+def potentialDevices():
+	return [dev for dev in os.listdir("/dev") if dev.startswith(("ttyACM", "ttyUSB", "tty.usbmodem"))]
 
 # Root menu
 @app.route('/')
 def root_menu():
+	global rc
 	if rc is None:
-		return redirect(url_for('connect_menu'))
-	rcAddr = tryParseAddress(request.args.get('address'), default=None)
+		for device in potentialDevices():
+			newrc = Roboclaw("/dev/"+device, 115200, 0.01, 3)
+			if newrc.Open():
+				rc = newrc
+				break
+		# Failed to connect to USB, fall back to test stub.
+		if rc is None:
+			rc = Roboclaw_stub()
+
+	rcAddr = tryParseAddress(request.args.get('address'), default=128)
 
 	displayMenu = False
 	if rcAddr is not None:
 		try:
 			verString = readResult(rc.ReadVersion(rcAddr))
-			roboResponse = "Roboclaw at address {0} ({0:#x}) version: {1}".format(rcAddr, verString)
+			flash("Roboclaw at address {0} ({0:#x}) version: {1}".format(rcAddr, verString), successCategory)
 			displayMenu = True
 		except ValueError as ve:
-			roboResponse = "No Roboclaw response from address {0} ({0:#x})".format(rcAddr)
+			flash("No Roboclaw response from address {0} ({0:#x})".format(rcAddr), errorCategory)
 
 	else:
 		roboResponse = None
 
-	return render_template("root_menu.html", response=roboResponse, display=displayMenu, address=rcAddr)
+	return render_template("root_menu.html", display=displayMenu, address=rcAddr)
 
-
-# Connect menu let's the user specify serial port parameters for creating
+# Connect menu lets the user specify serial port parameters for creating
 # a Roboclaw object
 @app.route('/connect', methods=['GET', 'POST'])
 def connect_menu():
 	global rc
 	if request.method == 'GET':
-		if rc is None:
-			return render_template("connect_menu.html")
-		else:
-			return redirect(url_for('root_menu'))
+		return render_template("connect_menu.html", potentialDevices=potentialDevices())
 	elif request.method == 'POST':
 		# TODO sanity validation of these values from the HTML form
 		portName = request.form['port']
@@ -151,13 +164,13 @@ def connect_menu():
 
 		if newrc.Open():
 			rc = newrc
-			flash(successPrefix + "Roboclaw API connected to " + portName)
+			flash("Roboclaw API connected to " + portName, successCategory)
 			return redirect(url_for('root_menu', address="0x80"))
 		else:
-			flash(errorPrefix + "Roboclaw API could not open " + portName)
+			flash("Roboclaw API could not open " + portName, errorCategory)
 			return redirect(url_for('connect_menu'))
 	else:
-		flash(errorPrefix + "Unexpected request method on connect")
+		flash("Unexpected request method on connect", errorCategory)
 		return redirect(url_for('connect_menu'))
 
 # Config menu pulls down the current values of the general settings we care 
@@ -223,7 +236,7 @@ def config_menu():
 
 			return redirect(url_for('config_menu',address=rcAddr))
 		else:
-			flash(errorPrefix + "Unexpected request.method on config")
+			flash("Unexpected request.method on config", errorCategory)
 			return redirect(url_for('config_menu',address=rcAddr))
 	except ValueError as ve:
 		return redirect(url_for('root_menu'))
@@ -298,7 +311,7 @@ def encoder():
 
 			return redirect(url_for('root_menu', address=rcAddr))
 		else:
-			flash(errorPrefix + "Unexpected request.method on encoder")
+			flash("Unexpected request.method on encoder", errorCategory)
 			return redirect(url_for('encoder',address=rcAddr))
 
 	except ValueError as ve:
@@ -381,7 +394,7 @@ def velocity_menu():
 
 			return redirect(url_for('velocity_menu',address=rcAddr))
 		else:
-			flash(errorPrefix + "Unexpected request.method on velocity")
+			flash("Unexpected request.method on velocity", errorCategory)
 			return redirect(url_for('velocity_menu',address=rcAddr))
 	except ValueError as ve:
 		return redirect(url_for('root_menu'))
@@ -480,7 +493,7 @@ def position_menu():
 
 			return redirect(url_for('position_menu',address=rcAddr))
 		else:
-			flash(errorPrefix + "Unexpected request.method on position")
+			flash("Unexpected request.method on position", errorCategory)
 			return redirect(url_for('position_menu',address=rcAddr))
 	except ValueError as ve:
 		return redirect(url_for('root_menu'))
@@ -493,7 +506,7 @@ def to_position():
 
 		# TODO sanity validation of these values from the HTML form
 		# Pull values from form, update them in session dictionary.
-		session['m1accel'] = m1accel = int(request.form['m1accel'])		
+		session['m1accel'] = m1accel = int(request.form['m1accel'])
 		session['m2accel'] = m2accel = int(request.form['m2accel'])
 		session['m1speed'] = m1speed = int(request.form['m1speed'])
 		session['m2speed'] = m2speed = int(request.form['m2speed'])
@@ -541,7 +554,7 @@ def drive_control():
 				m1delta = int(rotation * eppr / 360)
 				m2delta = -m1delta
 			else:
-				flash(errorPrefix + "Unknown movement type")
+				flash("Unknown movement type", errorCategory)
 
 			m1accel = session.get('m1accel', defaultAccelDecel)
 			m2accel = session.get('m2accel', defaultAccelDecel)
@@ -563,7 +576,7 @@ def drive_control():
 
 			return redirect(url_for('drive_control',address=rcAddr))
 		else:
-			flash(errorPrefix + "Unexpected request.method on drive_control")
+			flash("Unexpected request.method on drive_control", errorCategory)
 			return redirect(url_for('drive_control',address=rcAddr))
 	except ValueError as ve:
 		return redirect(url_for('root_menu'))
@@ -601,7 +614,16 @@ def basic_motor():
 
 			return redirect(url_for('basic_motor',address=rcAddr))
 		else:
-			flash(errorPrefix + "Unexpected request.method on drive_control")
+			flash("Unexpected request.method on drive_control", errorCategory)
 			return redirect(url_for('basic_motor',address=rcAddr))
 	except ValueError as ve:
 		return redirect(url_for('root_menu'))
+
+@app.route('/shutdown')
+def call_shutdown():
+	r = call("systemctl poweroff", shell=True)
+	if r == 0:
+		flash("Shutting down...", successCategory)
+	else:
+		flash("Shutdown attempt failed with error {0}".format(r), errorCategory)
+	return redirect(url_for('root_menu'))

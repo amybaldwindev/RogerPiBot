@@ -41,4 +41,5 @@ flask run &
 ```
 @chromium-browser --kiosk http://localhost:5000/
 ```
+- Optional: Turn off screensaver https://www.raspberrypi.org/documentation/configuration/screensaver.md
 - Reboot
